@@ -44,7 +44,7 @@ class Game:
     _number_of_targets: int
     _number_of_found_targets: int
     _number_of_revealed: int
-    _solver: mole_solver.Solver
+    _solver: "mole_solver.Solver"
 
     def __init__(self, board_size: int, number_of_targets: int):
         assert board_size > 0 and board_size ** 2 >= number_of_targets > 0
@@ -160,8 +160,8 @@ class Button:
 if __name__ == '__main__':
     # game settings
     BOARD_SIZE: int = 4
-    MOLES: int = 5
-    FONT = 'comicsans'
+    MOLES: int = 4
+    FONT = 'newcmsans'
     engine_enabled: bool = False
     BUTTON_COLOR = "dodgerblue"
     BUTTON_HOVER_COLOR = "lightskyblue"
@@ -246,7 +246,7 @@ if __name__ == '__main__':
         screen.blit(engine_button_text, engine_button_rect)
 
         if engine_enabled:
-            depth_text = sidebar_font.render("Worst Case:", True, (255, 255, 255))
+            depth_text = sidebar_font.render("Max necessary shots:", True, (255, 255, 255))
             depth_rect = depth_text.get_rect(topleft=(GAME_SIZE, SIDEBAR_Y_OFFSET + FONT_SIZE * 6))
             depth_value_text = sidebar_font.render(f"{game.solver.most_shots_necessary}", True, (255, 255, 255))
             depth_value_rect = depth_value_text.get_rect(topright=(WINDOW_WIDTH - SIDEBAR_X_OFFSET, SIDEBAR_Y_OFFSET + FONT_SIZE * 6))
@@ -312,11 +312,13 @@ if __name__ == '__main__':
                     continue
 
 
-                if game.shoot_target(*get_row_and_col_from_pixel(event.pos)) and engine_enabled:
-                    game.start_engine()
+                if not game.shoot_target(*get_row_and_col_from_pixel(event.pos)):
+                    continue
 
                 game.print_for_human_play()
                 print()
+                if engine_enabled:
+                    game.start_engine()
 
             if event.type == pygame.MOUSEMOTION:
                 for field in flatten(game.board):

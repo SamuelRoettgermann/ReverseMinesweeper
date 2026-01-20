@@ -1,12 +1,8 @@
 import dataclasses
-import functools
-import itertools
 from functools import lru_cache
-from typing import Generator
-from enum import Enum, auto
-from unittest import case
+from typing import Iterator
 
-import mole_game
+from mole_game import Game
 
 
 def flatten(*xss) -> list:
@@ -48,25 +44,25 @@ class Coordinate:
 
 
 class Solver:
-    INF: int = 10 ** 9
+    INF: int = 1000
 
+    number_of_targets: int
     position: SolverPosition
     best_move: Coordinate | None
     most_shots_necessary: int
 
     def __init__(self, size: int, number_of_targets: int):
-        self.position = SolverPosition(size, tuple(), number_of_targets)
+        self.number_of_targets = number_of_targets
+        self.position = SolverPosition(size, tuple(), self.number_of_targets)
         self.best_move = None
         self.most_shots_necessary = self.position.size ** 2
 
     def _reset_board(self):
         board = tuple(tuple(SolverField() for _ in range(self.position.size)) for _ in range(self.position.size))
         self.position = SolverPosition(size=self.position.size, board=board,
-                                       remaining_targets=self.position.remaining_targets)
+                                       remaining_targets=self.number_of_targets)
 
-    def load_position(self, game: mole_game.Game):
-        self._reset_board()
-
+    def load_position(self, game: Game):
         revealed_moles: int = sum(
             1 for row in range(self.position.size)
             for col in range(self.position.size)
@@ -79,13 +75,13 @@ class Solver:
             neighbour_moles=game.board[row][col].neighbours if revealed and not is_mole else None,
         ) for col in range(self.position.size)) for row in range(self.position.size))
         self.position = SolverPosition(size=self.position.size, board=board,
-                                       remaining_targets=self.position.remaining_targets - revealed_moles)
+                                       remaining_targets=self.number_of_targets - revealed_moles)
 
         self.best_move = None
         self.most_shots_necessary = sum(1 for field in flatten(self.position.board) if field.hidden)
 
     @staticmethod
-    def neighbours(size: int, row: int, col: int) -> Generator[Coordinate]:
+    def neighbours(size: int, row: int, col: int) -> Iterator[Coordinate]:
         for delta_row in (-1, 0, 1):
             for delta_col in (-1, 0, 1):
                 if delta_row == 0 and delta_col == 0:
@@ -98,7 +94,7 @@ class Solver:
                     yield Coordinate(neighbour_row, neighbour_col)
 
     @staticmethod
-    def get_all_cells(position: SolverPosition) -> Generator[tuple[SolverField, int, int]]:
+    def get_all_cells(position: SolverPosition) -> Iterator[tuple[SolverField, int, int]]:
         for row in range(position.size):
             for col in range(position.size):
                 yield position.board[row][col], row, col
@@ -173,7 +169,7 @@ class Solver:
         return tuple(Solver.generate_frontier_assignments(position))
 
     @staticmethod
-    def generate_frontier_assignments(position: SolverPosition) -> Generator[dict[Coordinate, bool]]:
+    def generate_frontier_assignments(position: SolverPosition) -> Iterator[dict[Coordinate, bool]]:
         frontier_set: set[Coordinate] = Solver.get_frontier(position)
         frontier: list[Coordinate] = list(frontier_set)
         constraints = Solver.get_constraints(position, frontier_set)
@@ -186,13 +182,13 @@ class Solver:
 
         assignment: dict[Coordinate, bool] = {}
 
-        def backtrack(frontier_idx: int, moles_left: int):
+        def backtrack(frontier_idx: int, moles_left: int) -> Iterator[dict[Coordinate, bool]]:
             if frontier_idx == len(frontier):
                 # remaining moles must fit into deep unknowns
                 if 0 <= moles_left <= deep_unknown_count:
                     yield assignment.copy()
 
-                return None
+                return
 
             cell: Coordinate = frontier[frontier_idx]
 
@@ -234,33 +230,83 @@ class Solver:
         )
 
     @staticmethod
-    def outcomes_for_move(position: SolverPosition, move: Coordinate) -> Generator[tuple[bool, int | None]]:
-        frontier: set[Coordinate] = Solver.get_frontier(position)
+    def outcomes_for_move(position: SolverPosition, move: Coordinate) -> Iterator[tuple[bool, int | None]]:
+        seen: set[tuple[bool, int | None]] = set()
 
-        if move not in frontier:
-            # deep unknown cell => unconstrained
-            yield True, None
-            yield False, 0
-            return
-
-        # frontier cell:
-        seen: set[tuple[bool, int]] = set()
+        # We must look at ALL valid frontier assignments
         for assignment in Solver.cached_generate_frontier_assignments(position):
-            if move not in assignment:
-                continue
+            if move in assignment:
+                # Frontier cell logic
+                is_mole = assignment[move]
+                val = None
+                if not is_mole:
+                    val = sum(1 for n in Solver.neighbours(position.size, move.row, move.col)
+                              if assignment.get(n) is True)
 
-            is_mole: bool = assignment[move]
-            if is_mole:
-                outcome = is_mole, None
+                outcome = (is_mole, val)
+                if outcome not in seen:
+                    seen.add(outcome)
+                    yield outcome
             else:
-                neighbour_moles: int = sum(1
-                                           for neighbour in Solver.neighbours(position.size, move.row, move.col)
-                                           if assignment.get(neighbour) is True)
-                outcome = is_mole, neighbour_moles
+                # Deep unknown cell logic:
+                # It could be a mole or not, but we must check if
+                # there are moles left to place there.
+                frontier_set: set[Coordinate] = Solver.get_frontier(position)
+                moles_in_frontier: int = sum(1 for is_mole in assignment.values() if is_mole)
+                moles_left_for_deep: int = position.remaining_targets - moles_in_frontier
 
-            if outcome not in seen:
-                seen.add(outcome)
-                yield outcome
+                deep_cells: list[Coordinate] = [Coordinate(r, c) for r in range(position.size) for c in range(position.size)
+                              if position.board[r][c].hidden and Coordinate(r, c) not in frontier_set]
+
+                # If we have moles left, 'True' is a possible outcome
+                if moles_left_for_deep > 0:
+                    if (True, None) not in seen:
+                        seen.add((True, None))
+                        yield True, None
+
+                # If there's room to NOT be a mole, 'False' is possible
+                if len(deep_cells) > moles_left_for_deep:
+                    # For neighbor count, we calculate how many frontier moles
+                    # touch this deep cell.
+                    nearby_frontier_moles = sum(1 for n in Solver.neighbours(position.size, move.row, move.col)
+                                                if assignment.get(n) is True)
+
+                    # Note: In a perfect solver, you'd also consider moles placed
+                    # in other deep cells, but usually, '0' or 'nearby_frontier_moles'
+                    # is a safe lower bound.
+                    outcome = (False, nearby_frontier_moles)
+                    if outcome not in seen:
+                        seen.add(outcome)
+                        yield outcome
+
+    # @staticmethod
+    # def outcomes_for_move(position: SolverPosition, move: Coordinate) -> Iterator[tuple[bool, int | None]]:
+    #     frontier: set[Coordinate] = Solver.get_frontier(position)
+    #
+    #     if move not in frontier:
+    #         # deep unknown cell => unconstrained
+    #         yield True, None
+    #         yield False, 0
+    #         return
+    #
+    #     # frontier cell:
+    #     seen: set[tuple[bool, int]] = set()
+    #     for assignment in Solver.cached_generate_frontier_assignments(position):
+    #         if move not in assignment:
+    #             continue
+    #
+    #         is_mole: bool = assignment[move]
+    #         if is_mole:
+    #             outcome = is_mole, None
+    #         else:
+    #             neighbour_moles: int = sum(1
+    #                                        for neighbour in Solver.neighbours(position.size, move.row, move.col)
+    #                                        if assignment.get(neighbour) is True)
+    #             outcome = is_mole, neighbour_moles
+    #
+    #         if outcome not in seen:
+    #             seen.add(outcome)
+    #             yield outcome
 
 
 
@@ -278,7 +324,7 @@ class Solver:
 
             for neighbour_row, neighbour_col in Solver.neighbours(position.size, row, col):
                 neighbour: SolverField = position.board[neighbour_row][neighbour_col]
-                if neighbour.is_mole is True:
+                if neighbour.is_mole:
                     known_neighbouring_moles += 1
                 elif neighbour.is_mole is None:
                     unknown_neighbouring_moles += 1
@@ -296,64 +342,81 @@ class Solver:
 
     @staticmethod
     @lru_cache(maxsize=None)
-    def solve(position: SolverPosition) -> int:
+    def worst_case_remaining_shots(position: SolverPosition) -> int:
+        if not Solver.position_is_consistent(position):
+            return -1  # impossible path
+
         if position.remaining_targets == 0:
             return 0
 
         unrevealed_coordinates: list[Coordinate] = [Coordinate(row, col) for cell, row, col in
                                                     Solver.get_all_cells(position) if cell.hidden]
-
         if not unrevealed_coordinates:
             return Solver.INF  # this should never happen
 
-        best_score: int = Solver.INF
+        best_move_worst_case: int = Solver.INF
 
+        move_found: bool = False
         for move in unrevealed_coordinates:
-            worst_score: int = 0
+            possible_outcomes = list(Solver.outcomes_for_move(position, move))
+            if not possible_outcomes:
+                continue
 
-            for is_mole, neighbour_moles in Solver.outcomes_for_move(position, move):
+            move_found = True
+            current_move_max: int = 0
+
+            for is_mole, neighbour_moles in possible_outcomes:
                 next_pos: SolverPosition = Solver.apply_move(position, move, is_mole, neighbour_moles)
-                if not Solver.position_is_consistent(next_pos):
-                    continue  # impossible position
 
-                worst_score = max(worst_score, Solver.solve(next_pos))
+                next_step_result = Solver.worst_case_remaining_shots(next_pos)
+                if next_step_result != -1:
+                    current_move_max = max(current_move_max, 1 + next_step_result)
 
-                # pruning
-                if worst_score >= best_score:
-                    break
+            if current_move_max > 0:
+                best_move_worst_case = min(best_move_worst_case, current_move_max)
 
-            best_score = min(best_score, worst_score)
-
-        return best_score
+        return best_move_worst_case
 
     def calculate_best_field(self):
-        best_score: int = Solver.INF
+        Solver.worst_case_remaining_shots.cache_clear()
+        Solver.cached_generate_frontier_assignments.cache_clear()
+
+        best_minimax_cost: int = Solver.INF
         best_move: Coordinate | None = None
 
+        unrevealed_coordinates: list[Coordinate] = [Coordinate(row, col) for cell, row, col in
+                                                    Solver.get_all_cells(self.position) if cell.hidden]
+
+        i: int = 0
         for cell, row, col in Solver.get_all_cells(self.position):
             if not cell.hidden:
                 continue
 
+            print(f"Trying {cell = } ({i}/{len(unrevealed_coordinates)})")
+            i += 1
+
             move: Coordinate = Coordinate(row, col)
-            worst_score: int = 0
+            candidate_move_worst_case_cost: int = 0
+            possible_outcomes = list(Solver.outcomes_for_move(self.position, move))
 
-            for is_mole, neighbour_moles in Solver.outcomes_for_move(self.position, move):
+            if not possible_outcomes:
+                continue
+
+            for is_mole, neighbour_moles in possible_outcomes:
                 next_pos: SolverPosition = Solver.apply_move(self.position, move, is_mole, neighbour_moles)
-                if not Solver.position_is_consistent(next_pos):
-                    continue
 
-                worst_score = max(worst_score, Solver.solve(next_pos))
+                next_step_result = Solver.worst_case_remaining_shots(next_pos)
+                if next_step_result != -1:
+                    candidate_move_worst_case_cost = max(candidate_move_worst_case_cost, 1 + next_step_result)
 
-                # pruning
-                if worst_score >= best_score:
-                    break
+            print(f"\t{candidate_move_worst_case_cost}")
 
-            if worst_score < best_score:
-                best_score = worst_score
+            if 0 < candidate_move_worst_case_cost < best_minimax_cost:
+                best_minimax_cost = candidate_move_worst_case_cost
                 best_move = move
 
         self.best_move = best_move
-        self.most_shots_necessary = best_score
+        self.most_shots_necessary = best_minimax_cost
 
     def stop_calculation(self):
         pass
